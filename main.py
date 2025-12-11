@@ -58,18 +58,18 @@ class MatchResponse(BaseModel):
 def load_sitter_data():
     """
     Load sitter data from Supabase
-    Expected columns: name, zip_code, latitude, longitude, services, special_needs, availability_start, availability_end
+    Expected columns: full_name, zip_code, lat, lon, boarding_availability, 
+                      experience_with_special_needs, availability_start_date
     """
     try:
         print("Loading sitter data from Supabase...")
         response = supabase.table('sitters').select('*').execute()
         
-        print(f"Supabase response: {response.data}")
+        print(f"Supabase response count: {len(response.data) if response.data else 0}")
         
         if not response.data or len(response.data) == 0:
             print("WARNING: No sitters found in database")
-            return pd.DataFrame(columns=['name', 'zip_code', 'latitude', 'longitude', 
-                                        'services', 'special_needs', 'availability_start', 'availability_end'])
+            return pd.DataFrame()
         
         df = pd.DataFrame(response.data)
         print(f"Loaded {len(df)} sitters")
@@ -98,12 +98,8 @@ def haversine_distance(lat1, lon1, lat2, lon2):
 
 # Geocoding using free zippopotam.us API
 def geocode_zipcode(zipcode):
-    """
-    Convert zipcode to lat/lon using zippopotam.us API
-    Free, no API key needed
-    """
+    """Convert zipcode to lat/lon using zippopotam.us API"""
     try:
-        # Try zippopotam.us API
         url = f"http://api.zippopotam.us/us/{zipcode}"
         response = requests.get(url, timeout=5)
         
@@ -114,12 +110,11 @@ def geocode_zipcode(zipcode):
             print(f"Geocoded {zipcode} to ({lat}, {lon})")
             return (lat, lon)
         else:
-            print(f"Zipcode {zipcode} not found in zippopotam.us, using default NYC")
+            print(f"Zipcode {zipcode} not found, using default NYC")
             return (40.7589, -73.9851)
             
     except Exception as e:
         print(f"Error geocoding zipcode {zipcode}: {e}")
-        # Fallback to default NYC location
         return (40.7589, -73.9851)
 
 # Calculate special needs score
@@ -163,28 +158,27 @@ def calculate_distance_score(distance):
         return 10
 
 # Calculate availability score
-def calculate_availability_score(requested_start, requested_end, available_start, available_end):
-    """40 points if available, 0 if not"""
+def calculate_availability_score(requested_date, boarding_availability):
+    """
+    40 points if boarding available, 0 if not
+    boarding_availability should be 'yes' or 'no'
+    """
     try:
-        req_start = datetime.strptime(str(requested_start), '%Y-%m-%d')
-        req_end = datetime.strptime(str(requested_end), '%Y-%m-%d') if requested_end else req_start
-        avail_start = datetime.strptime(str(available_start), '%Y-%m-%d')
-        avail_end = datetime.strptime(str(available_end), '%Y-%m-%d')
-        
-        if avail_start <= req_start and req_end <= avail_end:
+        if str(boarding_availability).lower() in ['yes', 'true', '1']:
             return 40
-        else:
-            return 0
+        return 0
     except Exception as e:
         print(f"Error calculating availability score: {e}")
         return 0
 
-# Calculate service match score
-def calculate_service_score(requested_service, offered_services):
-    """20 points if service matches"""
+# Calculate service match score  
+def calculate_service_score(requested_service, boarding_availability):
+    """
+    20 points if service matches
+    For now, assuming if boarding_availability is yes, they offer both services
+    """
     try:
-        offered_list = [s.strip().lower() for s in str(offered_services).split(',')]
-        if str(requested_service).lower() in offered_list:
+        if str(boarding_availability).lower() in ['yes', 'true', '1']:
             return 20
         return 0
     except Exception as e:
@@ -202,8 +196,7 @@ def match_sitters(request: OwnerRequest):
         print(f"\n=== Matching Request ===")
         print(f"Zip: {request.zipCode}")
         print(f"Service: {request.service}")
-        print(f"Start: {request.startDate}")
-        print(f"End: {request.endDate}")
+        print(f"Date: {request.startDate}")
         print(f"Needs: {request.needs}")
         
         # Load sitter data from Supabase
@@ -222,35 +215,39 @@ def match_sitters(request: OwnerRequest):
         
         for idx, sitter in sitters_df.iterrows():
             try:
-                # Calculate distance
+                # Calculate distance using 'lat' and 'lon' (not latitude/longitude)
                 distance = haversine_distance(
                     owner_lat, owner_lon,
-                    sitter['latitude'], sitter['longitude']
+                    sitter['lat'], sitter['lon']
                 )
                 
                 # Calculate component scores
                 distance_score = calculate_distance_score(distance)
                 availability_score = calculate_availability_score(
                     request.startDate,
-                    request.endDate or request.startDate,
-                    sitter['availability_start'],
-                    sitter['availability_end']
+                    sitter.get('boarding_availability', 'no')
                 )
-                service_score = calculate_service_score(request.service, sitter['services'])
-                special_needs_score = calculate_special_needs_score(request.needs, sitter['special_needs'])
+                service_score = calculate_service_score(
+                    request.service, 
+                    sitter.get('boarding_availability', 'no')
+                )
+                special_needs_score = calculate_special_needs_score(
+                    request.needs, 
+                    sitter.get('experience_with_special_needs', '')
+                )
                 
                 # Total score (max 120 points)
                 total_score = distance_score + availability_score + service_score + special_needs_score
                 
-                print(f"Sitter: {sitter['name']}, Score: {total_score} (dist:{distance_score}, avail:{availability_score}, svc:{service_score}, needs:{special_needs_score})")
+                print(f"Sitter: {sitter['full_name']}, Score: {total_score} (dist:{distance_score}, avail:{availability_score}, svc:{service_score}, needs:{special_needs_score})")
                 
                 results.append({
-                    'name': str(sitter['name']),
+                    'name': str(sitter['full_name']),
                     'location': str(sitter['zip_code']),
                     'distance': round(float(distance), 2),
                     'score': int(total_score),
-                    'availability': f"{sitter['availability_start']} to {sitter['availability_end']}",
-                    'special_needs': str(sitter.get('special_needs', 'None'))
+                    'availability': 'Available' if sitter.get('boarding_availability', 'no').lower() in ['yes', 'true', '1'] else 'Not Available',
+                    'special_needs': str(sitter.get('experience_with_special_needs', 'None'))
                 })
             except Exception as e:
                 print(f"Error processing sitter {idx}: {e}")
