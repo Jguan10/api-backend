@@ -7,6 +7,8 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 import math
+import os
+from supabase import create_client, Client
 
 app = FastAPI(title="Pet Sitter Matching API")
 
@@ -18,6 +20,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Supabase setup
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise ValueError("SUPABASE_URL and SUPABASE_KEY must be set in environment variables")
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # Pydantic models
 class OwnerRequest(BaseModel):
@@ -38,25 +49,22 @@ class SitterMatch(BaseModel):
 class MatchResponse(BaseModel):
     matches: List[SitterMatch]
 
-# Load sitter data (you'll need to provide the actual CSV file)
-# For now, this is a placeholder - replace with your actual data loading
+# Load sitter data from Supabase
 def load_sitter_data():
-    # TODO: Load your actual sitter data from CSV
-    # df = pd.read_csv('sitters.csv')
-    # For demonstration, creating sample data
-    sample_data = {
-        'name': ['Alice Johnson', 'Bob Smith', 'Carol Williams', 'David Brown', 'Emma Davis'],
-        'zip_code': ['10001', '10002', '10003', '10004', '10005'],
-        'latitude': [40.7589, 40.7614, 40.7489, 40.7569, 40.7639],
-        'longitude': [-73.9851, -73.9776, -73.9680, -73.9862, -73.9723],
-        'services': ['catBoarding,inHomeVisits', 'catBoarding', 'inHomeVisits', 'catBoarding,inHomeVisits', 'catBoarding'],
-        'special_needs': ['Medication (Daily), Anxiety, Senior Cats', 'Kittens, Medication (Occasional)', 
-                         'Anxiety, Blindness, Mobility Issues', 'Diabetes, Senior Cats, Medication (Daily)',
-                         'Kittens, Deafness'],
-        'availability_start': ['2025-01-01', '2025-01-15', '2025-01-01', '2025-01-20', '2025-01-01'],
-        'availability_end': ['2025-12-31', '2025-06-30', '2025-12-31', '2025-12-31', '2025-12-31']
-    }
-    return pd.DataFrame(sample_data)
+    """
+    Load sitter data from Supabase
+    """
+    try:
+        # Fetch all sitters from Supabase
+        response = supabase.table('sitters').select('*').execute()
+        
+        # Convert to DataFrame
+        df = pd.DataFrame(response.data)
+        
+        return df
+    except Exception as e:
+        print(f"Error loading sitter data from Supabase: {e}")
+        raise HTTPException(status_code=500, detail=f"Error loading sitter data: {str(e)}")
 
 # Haversine distance calculation
 def haversine_distance(lat1, lon1, lat2, lon2):
@@ -79,20 +87,24 @@ def haversine_distance(lat1, lon1, lat2, lon2):
     
     return c * r
 
-# Geocoding function (placeholder - you'll need actual geocoding)
+# Geocoding function using Supabase or external API
 def geocode_zipcode(zipcode):
     """
     Convert zipcode to lat/lon
-    TODO: Implement actual geocoding using an API
+    First tries to get from Supabase zipcodes table, then falls back to default
     """
-    # Placeholder mapping - replace with actual geocoding API
-    zipcode_coords = {
-        '10001': (40.7506, -73.9971),
-        '10002': (40.7156, -73.9862),
-        '10003': (40.7318, -73.9873),
-        '90210': (34.0901, -118.4065),
-    }
-    return zipcode_coords.get(zipcode, (40.7589, -73.9851))  # Default to NYC
+    try:
+        # Try to get from Supabase zipcodes table
+        response = supabase.table('zipcodes').select('latitude', 'longitude').eq('zip_code', zipcode).execute()
+        
+        if response.data and len(response.data) > 0:
+            return (response.data[0]['latitude'], response.data[0]['longitude'])
+        
+        # Fallback to default NYC location
+        return (40.7589, -73.9851)
+    except Exception as e:
+        print(f"Error geocoding zipcode: {e}")
+        return (40.7589, -73.9851)
 
 # Calculate special needs score using asymmetric matching
 def calculate_special_needs_score(owner_needs: str, sitter_needs: str):
@@ -195,7 +207,7 @@ def match_sitters(request: OwnerRequest):
     Match and rank sitters based on owner requirements
     """
     try:
-        # Load sitter data
+        # Load sitter data from Supabase
         sitters_df = load_sitter_data()
         
         # Get owner location
